@@ -129,6 +129,11 @@ def build_sql_prompt(
     - For region-based queries:
       * Use WHERE region ILIKE '%<region>%'.
       * Use AVG() so result is a single row per hazard.
+    
+    Optimization rules:
+    - Use CTEs (WITH …) to avoid scanning the same table multiple times.
+    - When querying multiple cities for the same hazard, use a VALUES list and join rather than repeating subqueries.
+    - For region-based averages, select once per hazard, not once per UNION branch.
     """
 
     user = {
