@@ -43,6 +43,21 @@ Design principles:
 
 ---
 
+## How to run locally
+
+# Backend
+1. Make sure you have python and pip installed.
+2. Run `pip install -r requirement.txt`
+3. Make sure to create `.env` by taking sample from .env.sample.
+4. To run the code - `uvicorn main:app --port 8000` (You can run at any port)
+
+# Frontend
+1. Install node and npm.
+2. Run `npm install` to install necessary packages
+3. Make sure to create `.env` by taking sample from .env.sample.
+4. Run `npm run dev` to run locally
+
+
 ## Location Handling
 
 - **Cities** → resolved directly by the LLM into approximate coordinates, then matched to the nearest mesh cell using:  

@@ -5,3 +5,6 @@ backend/venv/
 # Environment files
 frontend/.env
 backend/.env
+
+## Test files
+backend/__pycache__
