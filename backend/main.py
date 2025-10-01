@@ -2,10 +2,8 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
 from database import run_sql_query, validate_sql
 from llm import generate_sql, stream_summarize_answer, load_doc_from_db, detect_hazards,fallback_stream_answer
-from geoLocations import extract_cities, get_coords
 
 app = FastAPI()
 
@@ -28,9 +26,6 @@ def ask_question(req: QueryRequest):
     user_query = req.query
 
     #Step 1: Detect cities and their coordinated
-    detected_cities = extract_cities(user_query)
-    city_coords = [(city, get_coords(city)) for city in detected_cities]
-    valid_city_coords = [(city, coords) for city, coords in city_coords if coords]
 
     # Step 2: Detect hazards
     hazard_tables = detect_hazards(user_query)
@@ -38,9 +33,7 @@ def ask_question(req: QueryRequest):
     # Step 3: Generate SQL
     sqlQuery = generate_sql(
         user_query=user_query,
-        detected_cities=detected_cities,
         hazard_tables=hazard_tables,
-        city_coords= city_coords if valid_city_coords else [],
     )
 
     # Step 4: Validate SQL

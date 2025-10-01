@@ -1,11 +1,10 @@
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
-from geoLocations import extract_cities,get_coords,detect_region
 from database import HAZARD_KEYWORDS,SCHEMA,HAZARD_KEYWORDS
 import re
 from documentReader import load_doc_from_db
-from typing import List, Tuple, Optional
+from typing import List, Optional
 
 load_dotenv()
 
@@ -38,16 +37,12 @@ def call_llm(messages: List[dict], model: str = "gpt-4o-mini", temperature: floa
     return resp.choices[0].message.content
 
 
-# Promp to built the SQL by providing the context of doc and other infom=rmation
 def build_sql_prompt(
     db_context_compact: str,
     user_query: str,
     hazards: List[str],
-    city_coords: List[Tuple[str, Tuple[float, float]]],
     region: Optional[str],
 ) -> List[dict]:
-    # Build messages for the LLM to generate SQL correctly
-
     # Hazard → table mapping
     table_map = {
         "cyclone": "CycloneRisk",
@@ -58,7 +53,6 @@ def build_sql_prompt(
         "FloodRisk": "FloodRisk",
         "HeatRisk": "HeatRisk",
         "WildfireRisk": "WildfireRisk",
-        # catch-all for general/physical/climate risk
         "physical": "ALL",
         "risk": "ALL",
         "climate": "ALL",
@@ -70,73 +64,75 @@ def build_sql_prompt(
     if not tbls or "ALL" in tbls:
         tbls = ["CycloneRisk", "FloodRisk", "HeatRisk", "WildfireRisk"]
 
-    tbls_str = ", ".join(sorted(set(tbls)))
-
     system = f"""
     You are a SQL generator for a Postgres climate risk database.
 
     Use only existing tables/columns.
-    Tables: CycloneRisk, FloodRisk, HeatRisk, WildfireRisk.
+    Tables: "CycloneRisk", "FloodRisk", "HeatRisk", "WildfireRisk".
 
     Location rules:
-    - If cities + coords are provided, query nearest mesh cell with:
-      ORDER BY geometry <-> ST_SetSRID(ST_MakePoint({{lon}}, {{lat}}), 4326)
-      LIMIT 1
-    - If no cities: infer the correct `region` from the user query.
-      The only valid values are:
-      north_america, south_america, europe, asia, oceania, africa
-      Map countries like US, USA, Canada, India, Brazil → one of these.
+    - If a specific city is mentioned in the user query:
+    * Determine its approximate longitude/latitude yourself.
+    * Always use those coordinates with:
+        ORDER BY geometry <-> ST_SetSRID(ST_MakePoint(lon, lat), 4326)
+        LIMIT 1
+    * Do not use AVG() here — just return the nearest cell value.
+
+    - If a country is mentioned (but not a specific city):
+    * Infer its continent-scale region (one of: north_america, south_america, europe, asia, oceania, africa).
+    * Use WHERE region ILIKE '%<region>%' to filter.
+    * Apply AVG() to produce a single row per hazard.
+
+    - If multiple cities or countries are mentioned:
+    * Generate one SELECT per location × hazard.
+    * Wrap each SELECT in parentheses if it contains ORDER BY or LIMIT.
+    * Add a literal column with the location name using AS city.
+    * Combine them with UNION ALL so each row corresponds to one location × hazard.
+
 
     Hazard rules:
-    - cyclone → CycloneRisk
-    - flood → FloodRisk
-    - heat → HeatRisk
-    - wildfire → WildfireRisk
-    - If user asks about "physical risk", "climate risk", or does not specify → use ALL four tables ({tbls_str}).
+    - cyclone → "CycloneRisk"
+    - flood → "FloodRisk"
+    - heat → "HeatRisk"
+    - wildfire → "WildfireRisk"
+    - If the user asks about "physical risk", "climate risk", or does not specify hazards → query all four tables.
 
     Column rules:
     - Risk/severity columns follow the pattern: ssp{{X}}_{{Y}}yr
-      * Valid X values: 1, 3, 5 (the SSP scenario)
-      * Valid Y values: 1, 10, 30 (the time horizon in years)
-      * Example valid columns: ssp1_1yr, ssp3_10yr, ssp5_30yr
+      * Valid X values: 1, 3, 5
+      * Valid Y values: 1, 10, 30
+      * Example: ssp1_1yr, ssp3_10yr, ssp5_30yr
     - Counts/frequency:
-      * CycloneRisk → total_annual_freq or cat{{Z}}_annual_freq
-      * FloodRisk → ssp{{X}}_{{Y}}yr_rp050_percent_flooded / ssp{{X}}_{{Y}}yr_rp200_percent_flooded
-      * HeatRisk → ssp{{X}}_{{Y}}yr_ann_days_above_096f, ssp{{X}}_{{Y}}yr_ann_heat_waves_4d5percent
-      * WildfireRisk → ssp{{X}}_{{Y}}yr_fires_30yr
+      * "CycloneRisk" → total_annual_freq or cat{{Z}}_annual_freq
+      * "FloodRisk" → ssp{{X}}_{{Y}}yr_rp050_percent_flooded, ssp{{X}}_{{Y}}yr_rp200_percent_flooded
+      * "HeatRisk" → ssp{{X}}_{{Y}}yr_ann_days_above_096f, ssp{{X}}_{{Y}}yr_ann_heat_waves_4d5percent
+      * "WildfireRisk" → ssp{{X}}_{{Y}}yr_fires_30yr
     - Prefer ssp5_10yr unless the user specifies another valid SSP or horizon.
     - If the user specifies an invalid horizon (e.g., 5 years), map it to the nearest valid horizon (1yr, 10yr, or 30yr).
 
     Output rules:
     - Return ONLY the SQL query string.
-    - Do not include markdown, code fences, or any explanations.
-    - Do not prepend text like "Here is the query".
-    - Always use quoted CamelCase table names exactly as:
-    "CycloneRisk", "FloodRisk", "HeatRisk", "WildfireRisk".
+    - Do not include markdown, code fences, or explanations.
+    - Always use quoted CamelCase table names.
     - Never use unquoted or lowercase table names.
-    - Do not use SELECT * — only select the needed columns.
-    - Always use aggregate functions (e.g., AVG()) so that the final result is a single row.
-    - Always alias selected columns using AS <descriptive_name> so the meaning is clear.
-    - Always include a literal column for the hazard type using AS hazard
-    (e.g., 'Flood' AS hazard, 'Cyclone' AS hazard).
-    - The final result for multiple cities × hazards must have: risk_score, city, hazard
+    - Do not use SELECT * — only select needed columns.
+    - Always alias columns with AS <descriptive_name>.
+    - Always include a literal column for hazard type using AS hazard.
+    - Final result must have: risk_score, city (or region), hazard.
     - For city-based queries:
-    * By default, select the single nearest mesh cell:
-        ORDER BY geometry <-> ST_SetSRID(ST_MakePoint({{lon}}, {{lat}}), 4326)
+      * If user asks for a specific city, do NOT include region filters.
+      * By default, select the single nearest mesh cell using:
+        ORDER BY geometry <-> ST_SetSRID(ST_MakePoint(lon, lat), 4326)
         LIMIT 1
-    * Do not use AVG() here — return the actual column value.
-    * Always alias the column with AS <descriptive_name>.
-    * Add a literal column with the city name using AS city (e.g., 'Boston' AS city).
-    * Wrap each SELECT in parentheses if it contains ORDER BY or LIMIT.
-    * Combine multiple cities and/or hazards using UNION ALL so that each row corresponds to one city × hazard combination.
+      * If averaging is required (e.g., “on average”), wrap in a subquery that selects the N nearest cells, then apply AVG() in the outer query.
+      * Never combine AVG() directly with ORDER BY/LIMIT in the same SELECT.
     - For region-based queries:
-    * Use WHERE region ILIKE '%<region>%' to filter.
-    * Use AVG() over the filtered rows so the result is a single row per hazard.
+      * Use WHERE region ILIKE '%<region>%'.
+      * Use AVG() so result is a single row per hazard.
     """
 
     user = {
         "user_query": user_query,
-        "cities": [{"city": c, "lon": lon, "lat": lat} for c, (lon, lat) in city_coords],
         "region": region,
         "hazards": tbls,
         "db_context": db_context_compact,
@@ -147,7 +143,8 @@ def build_sql_prompt(
         {"role": "user", "content": f"{user}"}
     ]
 
-def generate_sql(user_query: str, detected_cities, hazard_tables, city_coords, region=None) -> str:
+
+def generate_sql(user_query: str, hazard_tables, region=None) -> str:
     """Master SQL generator with LLM + fallback."""
     database_context = load_doc_from_db('Beehive_DB_Context_Summary.docx')
 
@@ -156,7 +153,6 @@ def generate_sql(user_query: str, detected_cities, hazard_tables, city_coords, r
         db_context_compact=database_context,
         user_query=user_query,
         hazards=hazard_tables,
-        city_coords=city_coords,
         region=region,
     )
 

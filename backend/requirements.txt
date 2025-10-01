@@ -1,10 +1,7 @@
 fastapi
 uvicorn
 openai
-python-dotenv
+dotenv
 pydantic
 pg8000
 sqlparse
-Nominatim
-geopy
-spacy
