@@ -5,3 +5,4 @@ dotenv
 pydantic
 pg8000
 sqlparse
+python-docx
