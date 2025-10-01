@@ -76,18 +76,21 @@ def build_sql_prompt(
     * Always use those coordinates with:
         ORDER BY geometry <-> ST_SetSRID(ST_MakePoint(lon, lat), 4326)
         LIMIT 1
+    * Do NOT put geometry <-> ... in a WHERE clause.
     * Do not use AVG() here — just return the nearest cell value.
+    * Include a literal column with the city name using AS city.
 
     - If a country is mentioned (but not a specific city):
     * Infer its continent-scale region (one of: north_america, south_america, europe, asia, oceania, africa).
     * Use WHERE region ILIKE '%<region>%' to filter.
     * Apply AVG() to produce a single row per hazard.
+    * Include a literal column with the country/region name using AS region.
 
     - If multiple cities or countries are mentioned:
     * Generate one SELECT per location × hazard.
-    * Wrap each SELECT in parentheses if it contains ORDER BY or LIMIT.
-    * Add a literal column with the location name using AS city.
-    * Combine them with UNION ALL so each row corresponds to one location × hazard.
+    * If a SELECT contains ORDER BY or LIMIT, wrap it in parentheses.
+    * Always combine SELECTs with UNION ALL.
+    * Never separate SELECTs with commas.
 
 
     Hazard rules:
@@ -110,33 +113,18 @@ def build_sql_prompt(
     - Prefer ssp5_10yr unless the user specifies another valid SSP or horizon.
     - If the user specifies an invalid horizon (e.g., 5 years), map it to the nearest valid horizon (1yr, 10yr, or 30yr).
 
-    Output rules:
+    ### Output rules:
     - Return ONLY the SQL query string.
     - Do not include markdown, code fences, or explanations.
-    - Always use quoted CamelCase table names.
+    - Always use quoted CamelCase table names: "CycloneRisk", "FloodRisk", "HeatRisk", "WildfireRisk".
     - Never use unquoted or lowercase table names.
     - Do not use SELECT * — only select needed columns.
-    - Always alias columns with AS <descriptive_name>.
-    - Always include a literal column with the hazard type using AS hazard.
-    - If the location is a city, include it as 'CityName' AS city.
-    - If the location is a country or region, include it as 'CountryName' AS region.
-    - The final result must have: risk_score, hazard, and either city OR region (never both).
-    - Do not call a country or continent a city.
-    - For city-based queries:
-      * If user asks for a specific city, do NOT include region filters.
-      * By default, select the single nearest mesh cell using:
-        ORDER BY geometry <-> ST_SetSRID(ST_MakePoint(lon, lat), 4326)
-        LIMIT 1
-      * If averaging is required (e.g., “on average”), wrap in a subquery that selects the N nearest cells, then apply AVG() in the outer query.
-      * Never combine AVG() directly with ORDER BY/LIMIT in the same SELECT.
-    - For region-based queries:
-      * Use WHERE region ILIKE '%<region>%'.
-      * Use AVG() so result is a single row per hazard.
-
-      Optimization rules:
-    - Use CTEs (WITH …) to avoid scanning the same table multiple times.
-    - When querying multiple cities for the same hazard, use a VALUES list and join rather than repeating subqueries.
-    - For region-based averages, select once per hazard, not once per UNION branch.
+    - Always alias numeric values with AS risk_score.
+    - Always alias hazard with a literal string using AS hazard.
+    - Always alias the location with AS city (for cities) or AS region (for countries/continents).
+    - The final result must always have three columns: risk_score, hazard, and either city OR region (never both).
+    - Do not label a country or continent as a city.
+    - Combine multiple SELECTs only with UNION ALL. Never use commas between subqueries.
 
     """
 
