@@ -117,8 +117,11 @@ def build_sql_prompt(
     - Never use unquoted or lowercase table names.
     - Do not use SELECT * — only select needed columns.
     - Always alias columns with AS <descriptive_name>.
-    - Always include a literal column for hazard type using AS hazard.
-    - Final result must have: risk_score, city (or region), hazard.
+    - Always include a literal column with the hazard type using AS hazard.
+    - If the location is a city, include it as 'CityName' AS city.
+    - If the location is a country or region, include it as 'CountryName' AS region.
+    - The final result must have: risk_score, hazard, and either city OR region (never both).
+    - Do not call a country or continent a city.
     - For city-based queries:
       * If user asks for a specific city, do NOT include region filters.
       * By default, select the single nearest mesh cell using:
@@ -129,11 +132,12 @@ def build_sql_prompt(
     - For region-based queries:
       * Use WHERE region ILIKE '%<region>%'.
       * Use AVG() so result is a single row per hazard.
-    
-    Optimization rules:
+
+      Optimization rules:
     - Use CTEs (WITH …) to avoid scanning the same table multiple times.
     - When querying multiple cities for the same hazard, use a VALUES list and join rather than repeating subqueries.
     - For region-based averages, select once per hazard, not once per UNION branch.
+
     """
 
     user = {

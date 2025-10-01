@@ -25,34 +25,32 @@ def ask_question(req: QueryRequest):
 
     user_query = req.query
 
-    #Step 1: Detect cities and their coordinated
-
-    # Step 2: Detect hazards
+    # Step 1: Detect hazards
     hazard_tables = detect_hazards(user_query)
 
-    # Step 3: Generate SQL
+    # Step 2: Generate SQL
     sqlQuery = generate_sql(
         user_query=user_query,
         hazard_tables=hazard_tables,
     )
 
-    # Step 4: Validate SQL
+    # Step 3: Validate SQL
     if not validate_sql(sqlQuery):
         # fallback directly to LLM narrative answer
         return StreamingResponse(fallback_stream_answer(user_query), media_type="text/plain")
     
-    # Step 5: Run SQL
+    # Step 4: Run SQL
     try:
         result = run_sql_query(sqlQuery)
     except Exception as error:
         # fallback to LLM if DB error
         return StreamingResponse(fallback_stream_answer(user_query), media_type="text/plain")
 
-    # Step 6: Fallback if empty result
+    # Step 5: Fallback if empty result
     if not result:
         return StreamingResponse(fallback_stream_answer(user_query), media_type="text/plain")
 
-    # Step 7: Stream summarization with data
+    # Step 6: Stream summarization with data
     # Add DB context + SQL so summarizer knows column meanings
     db_context = load_doc_from_db('Beehive_DB_Context_Summary.docx')
 
