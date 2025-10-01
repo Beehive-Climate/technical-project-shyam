@@ -96,6 +96,10 @@ This ensures results are flexible: precise for cities, generalized for regions.
 
 ---
 
+## To run the test case
+
+- python -m pytest tests -v
+
 ## Outcome
 
 The prototype chat app now supports:  

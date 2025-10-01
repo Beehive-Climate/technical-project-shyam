@@ -7,7 +7,7 @@ export function useChat() {
     if (!query.trim()) return;
 
     setMessages((prev) => [...prev, { sender: "user", text: query }]);
-    setMessages((prev) => [...prev, { sender: "bot", text: "" }]);
+    setMessages((prev) => [...prev, { sender: "bot", text: "Thinking..." }]);
 
     try {
       const response = await fetch("http://127.0.0.1:8000/ask", {

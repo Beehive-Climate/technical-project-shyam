@@ -2,6 +2,16 @@ import ReactMarkdown from "react-markdown";
 
 function MessageBubble({ sender, text }) {
   const isUser = sender === "user";
+
+  const displayText =
+    text === "Thinking..."
+      ? (
+        <span className="thinking-dots">
+          Thinking<span>.</span><span>.</span><span>.</span>
+        </span>
+      )
+      : <ReactMarkdown>{text}</ReactMarkdown>;
+
   return (
     <div
       style={{
@@ -35,7 +45,7 @@ function MessageBubble({ sender, text }) {
             color: "#333",
           }}
         >
-          <ReactMarkdown>{text}</ReactMarkdown>
+          {displayText}
         </div>
       )}
     </div>
