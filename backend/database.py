@@ -1,4 +1,5 @@
 import os
+import re
 import sqlparse
 import pg8000.native
 from dotenv import load_dotenv
@@ -64,26 +65,40 @@ HAZARD_KEYWORDS = {
 }
 
 def validate_sql(sql: str) -> bool:
-    # To make sure it's Select and not deleting or updating our data
-    try:
-        parsed = sqlparse.parse(sql)[0]
-    except Exception:
-        return False
+    
+    # Validate that the SQL is a safe SELECT query that only touches allowed tables.
+    # Supports quoted CamelCase tables and UNION ALL queries wrapped in parentheses.
+    
+    sql = sql.strip()
 
-    # Ensure it's SELECT
-    first_token = parsed.token_first(skip_cm=True)
-    if not first_token or first_token.normalized.upper() != "SELECT":
+    try:
+        statements = sqlparse.parse(sql)
+        if not statements:
+            return False
+    except Exception:
         return False
 
     sql_upper = sql.upper()
 
-    # Require at least one allowed (quoted) table name
-    if not any(tbl.upper() in sql_upper for tbl in ALLOWED_TABLES):
+    # Block dangerous keywords
+    forbidden = ["DELETE", "UPDATE", "INSERT", "DROP", "ALTER", "TRUNCATE"]
+    if any(word in sql_upper for word in forbidden):
         return False
 
-    # Require a LIMIT (case-insensitive)
-    if "LIMIT" not in sql_upper:
+    # Ensure query starts with SELECT (allow parentheses first)
+    if not (sql_upper.lstrip().startswith("SELECT") or sql_upper.lstrip().startswith("(")):
         return False
+
+    # Collect all tables after FROM or JOIN (quoted CamelCase expected)
+    found_tables = re.findall(r'\b(?:FROM|JOIN)\s+("[A-Za-z0-9_]+")', sql)
+
+    if not found_tables:
+        return False
+
+    # Ensure every referenced table is in whitelist
+    for tbl in found_tables:
+        if tbl not in ALLOWED_TABLES:
+            return False
 
     return True
 

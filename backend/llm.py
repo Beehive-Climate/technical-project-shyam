@@ -3,10 +3,173 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from geoLocations import extract_cities,get_coords,detect_region
 from database import HAZARD_KEYWORDS,SCHEMA,HAZARD_KEYWORDS
+import re
+from documentReader import load_doc_from_db
+from typing import List, Tuple, Optional
 
 load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+# Extract the SQL query from the text from the llm generated text
+def extract_sql_from_text(text: str) -> Optional[str]:
+    """
+    Extract SQL if it contains a valid SELECT statement,
+    even if wrapped in parentheses (UNION ALL cases).
+    """
+    text = text.strip()
+
+    # Look for first occurrence of SELECT
+    match = re.search(r"\bSELECT\b", text, re.IGNORECASE)
+    if match:
+        return text
+
+    return None
+
+# Call the llm model to generate the answer
+def call_llm(messages: List[dict], model: str = "gpt-4o-mini", temperature: float = 0.0) -> str:
+  
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+    )
+    return resp.choices[0].message.content
+
+
+# Promp to built the SQL by providing the context of doc and other infom=rmation
+def build_sql_prompt(
+    db_context_compact: str,
+    user_query: str,
+    hazards: List[str],
+    city_coords: List[Tuple[str, Tuple[float, float]]],
+    region: Optional[str],
+) -> List[dict]:
+    # Build messages for the LLM to generate SQL correctly
+
+    # Hazard → table mapping
+    table_map = {
+        "cyclone": "CycloneRisk",
+        "flood": "FloodRisk",
+        "heat": "HeatRisk",
+        "wildfire": "WildfireRisk",
+        "CycloneRisk": "CycloneRisk",
+        "FloodRisk": "FloodRisk",
+        "HeatRisk": "HeatRisk",
+        "WildfireRisk": "WildfireRisk",
+        # catch-all for general/physical/climate risk
+        "physical": "ALL",
+        "risk": "ALL",
+        "climate": "ALL",
+    }
+
+    tbls = [table_map.get(h, h) for h in hazards]
+
+    # If no hazards detected OR "ALL" is present → use all tables
+    if not tbls or "ALL" in tbls:
+        tbls = ["CycloneRisk", "FloodRisk", "HeatRisk", "WildfireRisk"]
+
+    tbls_str = ", ".join(sorted(set(tbls)))
+
+    system = f"""
+    You are a SQL generator for a Postgres climate risk database.
+
+    Use only existing tables/columns.
+    Tables: CycloneRisk, FloodRisk, HeatRisk, WildfireRisk.
+
+    Location rules:
+    - If cities + coords are provided, query nearest mesh cell with:
+      ORDER BY geometry <-> ST_SetSRID(ST_MakePoint({{lon}}, {{lat}}), 4326)
+      LIMIT 1
+    - If no cities: infer the correct `region` from the user query.
+      The only valid values are:
+      north_america, south_america, europe, asia, oceania, africa
+      Map countries like US, USA, Canada, India, Brazil → one of these.
+
+    Hazard rules:
+    - cyclone → CycloneRisk
+    - flood → FloodRisk
+    - heat → HeatRisk
+    - wildfire → WildfireRisk
+    - If user asks about "physical risk", "climate risk", or does not specify → use ALL four tables ({tbls_str}).
+
+    Column rules:
+    - Risk/severity columns follow the pattern: ssp{{X}}_{{Y}}yr
+      * Valid X values: 1, 3, 5 (the SSP scenario)
+      * Valid Y values: 1, 10, 30 (the time horizon in years)
+      * Example valid columns: ssp1_1yr, ssp3_10yr, ssp5_30yr
+    - Counts/frequency:
+      * CycloneRisk → total_annual_freq or cat{{Z}}_annual_freq
+      * FloodRisk → ssp{{X}}_{{Y}}yr_rp050_percent_flooded / ssp{{X}}_{{Y}}yr_rp200_percent_flooded
+      * HeatRisk → ssp{{X}}_{{Y}}yr_ann_days_above_096f, ssp{{X}}_{{Y}}yr_ann_heat_waves_4d5percent
+      * WildfireRisk → ssp{{X}}_{{Y}}yr_fires_30yr
+    - Prefer ssp5_10yr unless the user specifies another valid SSP or horizon.
+    - If the user specifies an invalid horizon (e.g., 5 years), map it to the nearest valid horizon (1yr, 10yr, or 30yr).
+
+    Output rules:
+    - Return ONLY the SQL query string.
+    - Do not include markdown, code fences, or any explanations.
+    - Do not prepend text like "Here is the query".
+    - Always use quoted CamelCase table names exactly as:
+    "CycloneRisk", "FloodRisk", "HeatRisk", "WildfireRisk".
+    - Never use unquoted or lowercase table names.
+    - Do not use SELECT * — only select the needed columns.
+    - Always use aggregate functions (e.g., AVG()) so that the final result is a single row.
+    - Always alias selected columns using AS <descriptive_name> so the meaning is clear.
+    - Always include a literal column for the hazard type using AS hazard
+    (e.g., 'Flood' AS hazard, 'Cyclone' AS hazard).
+    - The final result for multiple cities × hazards must have: risk_score, city, hazard
+    - For city-based queries:
+    * By default, select the single nearest mesh cell:
+        ORDER BY geometry <-> ST_SetSRID(ST_MakePoint({{lon}}, {{lat}}), 4326)
+        LIMIT 1
+    * Do not use AVG() here — return the actual column value.
+    * Always alias the column with AS <descriptive_name>.
+    * Add a literal column with the city name using AS city (e.g., 'Boston' AS city).
+    * Wrap each SELECT in parentheses if it contains ORDER BY or LIMIT.
+    * Combine multiple cities and/or hazards using UNION ALL so that each row corresponds to one city × hazard combination.
+    - For region-based queries:
+    * Use WHERE region ILIKE '%<region>%' to filter.
+    * Use AVG() over the filtered rows so the result is a single row per hazard.
+    """
+
+    user = {
+        "user_query": user_query,
+        "cities": [{"city": c, "lon": lon, "lat": lat} for c, (lon, lat) in city_coords],
+        "region": region,
+        "hazards": tbls,
+        "db_context": db_context_compact,
+    }
+
+    return [
+        {"role": "system", "content": system.strip()},
+        {"role": "user", "content": f"{user}"}
+    ]
+
+def generate_sql(user_query: str, detected_cities, hazard_tables, city_coords, region=None) -> str:
+    """Master SQL generator with LLM + fallback."""
+    database_context = load_doc_from_db('Beehive_DB_Context_Summary.docx')
+
+    # Build messages
+    messages = build_sql_prompt(
+        db_context_compact=database_context,
+        user_query=user_query,
+        hazards=hazard_tables,
+        city_coords=city_coords,
+        region=region,
+    )
+
+    try:
+        llm_text = call_llm(messages)
+        sql = extract_sql_from_text(llm_text)
+        if sql:
+            return sql
+    except Exception as e:
+        print(f"[WARN] LLM SQL generation failed: {e}")
+
+    # Fallback: safe deterministic minimal query
+    return None
 
 def detect_hazards(user_query: str) -> list:
     
@@ -50,46 +213,6 @@ def build_city_hazard_block(city: str, lon: float, lat: float, table: str) -> st
     ) nearest
     """.strip()
 
-def generate_sql(user_query: str) -> str:
-    # --- Step 1: Extract cities and coordinates ---
-    detected_cities = extract_cities(user_query)
-    city_coords = [(city, get_coords(city)) for city in detected_cities]
-    valid_city_coords = [(city, coords) for city, coords in city_coords if coords]
-
-    # --- Step 2: Detect hazards ---
-    hazard_tables = detect_hazards(user_query)
-
-    # --- Step 3A: City-specific queries ---
-    if valid_city_coords:
-        sql_blocks = [
-            build_city_hazard_block(city, lon, lat, hazard)
-            for city, (lon, lat) in valid_city_coords
-            for hazard in hazard_tables
-        ]
-        return "\nUNION ALL\n\n".join(sql_blocks)
-
-    # --- Step 3B: Region-level queries (no city, but "US"/continent mentioned) ---
-    region = detect_region(user_query)   # <-- new helper function
-    if region:
-        sql_blocks = [
-            f"""
-            SELECT
-              '{region}' AS region,
-              '{hazard.strip('"')}' AS hazard,
-              AVG(ssp5_1yr)  AS risk_1yr,
-              AVG(ssp5_10yr) AS risk_10yr,
-              AVG(ssp5_30yr) AS risk_30yr
-            FROM {hazard}
-            WHERE region ILIKE '%{region}%
-            LIMIT 20'
-            """
-            for hazard in hazard_tables
-        ]
-        return "\nUNION ALL\n\n".join(sql_blocks)
-
-    # --- Step 4: Fallback to LLM for weird/global queries ---
-    return generate_fallback_sql(user_query)
-
 def generate_fallback_sql(user_query: str) -> str:
     
     # Ask the LLM to generate a safe SQL query when cities/coordinates
@@ -122,34 +245,62 @@ def generate_fallback_sql(user_query: str) -> str:
 
     return sql
 
-def stream_summarize_answer(user_query: str, db_result):
-    # Stream markdown-formatted summary of DB result
+def stream_summarize_answer(user_query: str, db_result, sql_query: str, db_context: str):
+    """
+    Stream a markdown-formatted summary of DB result with context:
+    - Only summarize hazards that were queried
+    - Distinguish between risk scores vs counts/frequencies vs percentages
+    - Include SQL + DB schema context for accurate explanations
+    """
 
     prompt = f"""
     User asked: {user_query}
-    Database returned: {db_result}
 
-    Write a clear, user-friendly answer in MARKDOWN with this structure:
+    SQL query executed:
+    {sql_query}
 
-    ### <City>
-    - **Cyclone Risk:** <numeric score(s) mapped to Low/Moderate/High>
-    - **Flood Risk:** <numeric score(s) mapped to Low/Moderate/High>
-    - **Heat Risk:** <numeric score(s) mapped to Low/Moderate/High>
-    - **Wildfire Risk:** <numeric score(s) mapped to Low/Moderate/High>
+    Database returned (raw values):
+    {db_result}
 
-    ### Summary
-    Provide a short paragraph (3–5 sentences) comparing the risks across hazards
-    and highlighting the biggest concerns for the user.
+    Database schema context (columns and their meaning):
+    {db_context}
+
+    Write a clear, user-friendly answer in MARKDOWN.
 
     Rules:
-    - Always map raw scores (1–7) into categories:
-    - 1–3 = Low
-    - 4–5 = Moderate
-    - 6–7 = High
-    - If multiple years (1yr, 10yr, 30yr) are present, mention the trend (e.g. "risk increases from Low to High").
-    - Only output markdown. No explanations or code fences.
-    """
+    - Only include hazards that are present in the SQL query or DB result.
+    - Do not output hazards that were not queried.
+    - If multiple hazards are present (e.g., UNION ALL), report each one separately.
+    - If only one hazard is present, output just that hazard.
 
+    Interpretation rules:
+    - If the column is a risk score (ssp{{X}}_{{Y}}yr, values 1–7), map it to categories:
+    * 1–3 = Low
+    * 4–5 = Moderate
+    * 6–7 = High
+    - If the column is a frequency (e.g., total_annual_freq, fires_30yr),
+    explain it as "expected number of events" over the relevant period.
+    - If the column is a flood extent percent (rp050/rp200),
+    explain it as "proportion of area flooded".
+    - If multiple horizons are present (1yr, 10yr, 30yr), describe the trend over time.
+
+    Location rules:
+    - Always reflect the location from the user query in the heading (city/country).
+    - If DB only provides region-level data, clearly state it as:
+    "<UserLocation> (data aggregated from <Region>)".
+    - If DB granularity is limited, you may add general knowledge about which subregions, states, or cities are most exposed to the hazard.
+    - Always clarify which parts come from the database result vs general knowledge.
+
+    Output format:
+    ### <User location, with aggregation note if needed>
+    - **<Hazard>:** <interpreted values with context + optional regional detail>
+
+    ### Summary
+    Provide a 5–6 sentence summary:
+    - Anchor on DB result first.
+    - If DB result is too broad, enrich the answer with well-known geographic patterns (e.g., “In India, eastern states like Bihar and Assam are particularly flood-prone”).
+    - Clearly separate database-based findings from general knowledge insights.
+    """
 
     stream = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -160,3 +311,9 @@ def stream_summarize_answer(user_query: str, db_result):
         if chunk.choices and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
 
+def fallback_stream_answer(user_query):
+    answer = call_llm([
+        {"role": "system", "content": "Answer the user based on general climate risk knowledge."},
+        {"role": "user", "content": user_query}
+    ])
+    yield answer
