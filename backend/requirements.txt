@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+openai
+dotenv
+pydantic
+pg8000
+sqlparse
+python-docx
